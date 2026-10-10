@@ -10,16 +10,18 @@ Lists every video on a profile and downloads each one, one by one, into
 library, so nothing needs to be installed. Running it again skips videos already saved,
 so it continues where it stopped and retries failed ones. Photo slideshows are skipped.
 
-Install (in a-Shell; its curl can fail without saying anything, so this uses Python):
+Install (in a-Shell, one line at a time; a-Shell skips commands chained with `&&`):
 
 ```
-cd ~/Documents && python3 -c "import urllib.request as u; u.urlretrieve('https://raw.githubusercontent.com/starchip942/tiktok-hd-downloader/main/tiktok_profile_hd.py', 'tiktok_profile_hd.py'); print('saved')"
+cd ~/Documents
+python3 -c "import urllib.request as u; open('tiktok_profile_hd.py','wb').write(u.urlopen('https://raw.githubusercontent.com/starchip942/tiktok-hd-downloader/main/tiktok_profile_hd.py', timeout=30).read()); print('saved')"
 ```
 
 Run:
 
 ```
-cd ~/Documents && python3 -u tiktok_profile_hd.py
+cd ~/Documents
+python3 -u tiktok_profile_hd.py
 ```
 
 ## tiktok_hd.py: single links, desktop
