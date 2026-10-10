@@ -13,6 +13,7 @@ stopped and retries anything that failed.
 Usage in a-Shell:
   python3 tiktok_profile_hd.py                (asks for the username)
   python3 tiktok_profile_hd.py someuser
+  python3 tiktok_profile_hd.py someuser otheruser thirduser   (one after another)
 """
 
 from argparse import ArgumentParser
@@ -290,25 +291,11 @@ def download_photos(post, folder):
     return saved
 
 
-def main():
-    parser = ArgumentParser(description="Download every video from a TikTok profile in max quality via MusicallyDown")
-    parser.add_argument("username", nargs="?", help="TikTok username (with or without @, or a profile link)")
-    parser.add_argument("--out", default=OUTPUTS, help="Folder to save into (default: a-Shell/TikTok Outputs)")
-    args = parser.parse_args()
-
-    # a-Shell isn't a real terminal, without this nothing shows up until the script ends
-    try:
-        stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
-    setdefaulttimeout(60)
-
-    username = args.username or input("TikTok username: ")
-    username = sub(r"^.*tiktok\.com/@", "", username.strip()).lstrip("@").split("/")[0].split("?")[0]
-    if not username:
-        raise SystemExit("No username given")
-
-    folder = path.join(path.abspath(path.expanduser(args.out)), username)
+def download_profile(username, out):
+    '''
+    download every photo post and video of one profile, return True if stopped with Ctrl-C
+    '''
+    folder = path.join(path.abspath(path.expanduser(out)), username)
     makedirs(folder, exist_ok=True)
     have_hd = set(findall(r"_(\d{15,})\.mp4", " ".join(listdir(folder))))
     have_slides = findall(r"_(\d{15,})_\d+\.jpg(?!\.)", " ".join(listdir(folder)))
@@ -317,7 +304,8 @@ def main():
     try:
         videos = profile_videos(username)
     except Exception as e:
-        raise SystemExit("Could not list videos: {}".format(e))
+        print("Could not list videos: {}".format(e))
+        return False
     photos = [v for v in videos if v["is_photo"]]
     videos = [v for v in videos if not v["is_photo"]]
     todo = [v for v in videos if v["id"] not in have_hd]
@@ -328,6 +316,7 @@ def main():
 
     done, failed = 0, []
     photos_done, failed_photos = 0, []
+    stopped = False
     try:
         # photos first, their image links expire after a day or two
         for number, post in enumerate(photos_todo, 1):
@@ -356,6 +345,7 @@ def main():
             if number < len(todo):
                 sleep(uniform(2, 4))
     except KeyboardInterrupt:
+        stopped = True
         print("\nStopped. Run it again to continue where it left off.")
 
     failed_list = path.join(folder, "failed.txt")
@@ -367,6 +357,45 @@ def main():
         remove(failed_list)
     print("\nDone: {} videos and {} photo posts downloaded, {} failed{}".format(
         done, photos_done, len(failed) + len(failed_photos), " (listed in failed.txt, run again to retry)" if failed or failed_photos else ""))
+    return stopped
+
+
+def clean_username(text):
+    '''
+    "@name", "name" or a profile link -> "name"
+    '''
+    return sub(r"^.*tiktok\.com/@", "", text.strip()).lstrip("@").split("/")[0].split("?")[0]
+
+
+def main():
+    parser = ArgumentParser(description="Download every video from TikTok profiles in max quality via MusicallyDown")
+    parser.add_argument("usernames", nargs="*", help="TikTok usernames (with or without @, or profile links), done one after another")
+    parser.add_argument("--out", default=OUTPUTS, help="Folder to save into (default: a-Shell/TikTok Outputs)")
+    args = parser.parse_args()
+
+    # a-Shell isn't a real terminal, without this nothing shows up until the script ends
+    try:
+        stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    setdefaulttimeout(60)
+
+    entered = args.usernames or input("TikTok usernames (separate with spaces): ").replace(",", " ").split()
+    usernames = list(dict.fromkeys(name for name in map(clean_username, entered) if name))
+    if not usernames:
+        raise SystemExit("No username given")
+
+    # one profile at a time, in the order given
+    for number, username in enumerate(usernames, 1):
+        if len(usernames) > 1:
+            print("\n========== [{}/{}] @{} ==========".format(number, len(usernames), username))
+        if download_profile(username, args.out):
+            if number < len(usernames):
+                print("Queue stopped, not started: {}".format(" ".join(usernames[number:])))
+            break
+    else:
+        if len(usernames) > 1:
+            print("\nAll {} profiles finished.".format(len(usernames)))
 
 
 if __name__ == "__main__":

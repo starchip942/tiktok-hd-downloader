@@ -25,6 +25,12 @@ cd ~/Documents
 python3 -u tiktok_profile_hd.py
 ```
 
+Several profiles, downloaded one after another:
+
+```
+python3 -u tiktok_profile_hd.py user1 user2 user3
+```
+
 ## tiktok_hd.py: single links, desktop
 
 ```
