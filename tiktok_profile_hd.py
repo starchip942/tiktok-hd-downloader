@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Download every video from a TikTok profile in max quality (MusicallyDown's HD file),
-one by one. Made for the a-Shell app on iPad, so it only uses the Python standard library.
+one by one, plus every photo post as full size JPEGs. Made for the a-Shell app on iPad,
+so it only uses the Python standard library.
 
-Videos are saved to  a-Shell/TikTok Outputs/<username>/  in the Files app
-(~/Documents/TikTok Outputs/<username>/), named <upload date>_<video id>.mp4.
-Videos that are already there are skipped, so running it again continues where it
+Files are saved to  a-Shell/TikTok Outputs/<username>/  in the Files app
+(~/Documents/TikTok Outputs/<username>/), named <upload date>_<video id>.mp4 and
+<upload date>_<post id>_<slide number>.jpg.
+Files that are already there are skipped, so running it again continues where it
 stopped and retries anything that failed.
 
 Usage in a-Shell:
@@ -166,7 +168,11 @@ def profile_videos(username):
         repeats = 0
         for item in new:
             seen.add(item["id"])
-            videos.append({"id": item["id"], "time": int(item.get("createTime") or 0), "is_photo": "imagePost" in item})
+            post = {"id": item["id"], "time": int(item.get("createTime") or 0), "is_photo": "imagePost" in item}
+            if post["is_photo"]:
+                # full size image links for each slide (they expire after a day or two)
+                post["images"] = [image.get("imageURL", {}).get("urlList") or [] for image in item["imagePost"].get("images") or []]
+            videos.append(post)
         print("  found {} so far...".format(len(videos)))
 
         old_cursor = cursor
@@ -258,6 +264,32 @@ def download_video(username, video, folder, tries=3):
     return None, 0, False
 
 
+def download_photos(post, folder):
+    '''
+    save every slide of a photo post as <date>_<id>_<n>.jpg, return how many were saved
+    '''
+    date = datetime.fromtimestamp(post["time"], timezone.utc).strftime("%Y-%m-%d") if post["time"] else "unknown-date"
+    saved = 0
+    for number, urls in enumerate(post["images"], 1):
+        target = path.join(folder, "{}_{}_{:02d}.jpg".format(date, post["id"], number))
+        if path.exists(target):
+            saved += 1
+            continue
+        for url in urls:
+            try:
+                with Browser().open(url, headers={"Referer": TIKTOK + "/"}) as response:
+                    image = response.read()
+                if len(image) > 1000 and "html" not in response.headers.get("Content-Type", ""):
+                    with open(target + ".part", "wb") as file:
+                        file.write(image)
+                    replace(target + ".part", target)
+                    saved += 1
+                    break
+            except Exception as e:
+                print("    slide {} failed: {}".format(number, e))
+    return saved
+
+
 def main():
     parser = ArgumentParser(description="Download every video from a TikTok profile in max quality via MusicallyDown")
     parser.add_argument("username", nargs="?", help="TikTok username (with or without @, or a profile link)")
@@ -279,6 +311,7 @@ def main():
     folder = path.join(path.abspath(path.expanduser(args.out)), username)
     makedirs(folder, exist_ok=True)
     have_hd = set(findall(r"_(\d{15,})\.mp4", " ".join(listdir(folder))))
+    have_slides = findall(r"_(\d{15,})_\d+\.jpg(?!\.)", " ".join(listdir(folder)))
 
     print("Listing @{}'s videos...".format(username))
     try:
@@ -288,11 +321,26 @@ def main():
     photos = [v for v in videos if v["is_photo"]]
     videos = [v for v in videos if not v["is_photo"]]
     todo = [v for v in videos if v["id"] not in have_hd]
-    print("{} videos ({} already saved, {} photo slideshows skipped), {} to download -> {}\n".format(
-        len(videos), len(videos) - len(todo), len(photos), len(todo), folder))
+    photos_todo = [p for p in photos if have_slides.count(p["id"]) < len(p["images"])]
+    print("{} videos ({} already saved), {} to download".format(len(videos), len(videos) - len(todo), len(todo)))
+    print("{} photo posts ({} already saved), {} to download".format(len(photos), len(photos) - len(photos_todo), len(photos_todo)))
+    print("-> {}\n".format(folder))
 
     done, failed = 0, []
+    photos_done, failed_photos = 0, []
     try:
+        # photos first, their image links expire after a day or two
+        for number, post in enumerate(photos_todo, 1):
+            print("[photo {}/{}] {}".format(number, len(photos_todo), post["id"]))
+            saved = download_photos(post, folder)
+            if saved == len(post["images"]):
+                photos_done += 1
+                print("    saved {} slides".format(saved))
+            else:
+                failed_photos.append(post["id"])
+                print("    only {} of {} slides saved".format(saved, len(post["images"])))
+            sleep(uniform(0.5, 1.5))
+
         for number, video in enumerate(todo, 1):
             print("[{}/{}] {}".format(number, len(todo), video["id"]))
             target, size, is_hd = download_video(username, video, folder)
@@ -311,12 +359,14 @@ def main():
         print("\nStopped. Run it again to continue where it left off.")
 
     failed_list = path.join(folder, "failed.txt")
-    if failed:
+    if failed or failed_photos:
         with open(failed_list, "w") as file:
-            file.write("\n".join("{}/@{}/video/{}".format(TIKTOK, username, i) for i in failed) + "\n")
+            file.write("".join("{}/@{}/video/{}\n".format(TIKTOK, username, i) for i in failed))
+            file.write("".join("{}/@{}/photo/{}\n".format(TIKTOK, username, i) for i in failed_photos))
     elif path.exists(failed_list):
         remove(failed_list)
-    print("\nDone: {} downloaded, {} failed{}".format(done, len(failed), " (listed in failed.txt, run again to retry)" if failed else ""))
+    print("\nDone: {} videos and {} photo posts downloaded, {} failed{}".format(
+        done, photos_done, len(failed) + len(failed_photos), " (listed in failed.txt, run again to retry)" if failed or failed_photos else ""))
 
 
 if __name__ == "__main__":

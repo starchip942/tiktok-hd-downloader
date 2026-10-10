@@ -8,7 +8,8 @@ Downloads TikTok videos in max quality through MusicallyDown's HD link (a large
 Lists every video on a profile and downloads each one, one by one, into
 `On My iPad › a-Shell › TikTok Outputs › <username>`. It only uses the Python standard
 library, so nothing needs to be installed. Running it again skips videos already saved,
-so it continues where it stopped and retries failed ones. Photo slideshows are skipped.
+so it continues where it stopped and retries failed ones. Photo posts are saved too,
+as full size JPEGs (one file per slide).
 
 Install (in a-Shell, one line at a time; a-Shell skips commands chained with `&&`):
 
