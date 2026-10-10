@@ -22,7 +22,9 @@ from json import loads
 from os import listdir, makedirs, path, remove, replace
 from random import choices, randint, uniform
 from re import findall, search, sub
+from socket import setdefaulttimeout
 from string import hexdigits
+from sys import stdout
 from time import sleep, time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -98,8 +100,13 @@ def tiktok_page(url):
     '''
     for attempt in range(3):
         for user_agent in (IPAD_USER_AGENT, USER_AGENT):
+            print("  opening {} ...".format(url))
             browser = Browser(user_agent)
-            data = page_data(browser.text(url, headers={"Referer": TIKTOK + "/"}))
+            try:
+                data = page_data(browser.text(url, headers={"Referer": TIKTOK + "/"}))
+            except Exception as e:
+                print("  could not open it: {}".format(e))
+                continue
             if data is not None:
                 return data, browser
         print("  TikTok is blocking the page, waiting {} seconds...".format(30 * (attempt + 1)))
@@ -220,6 +227,8 @@ def save(urls, target):
                             break
                         file.write(chunk)
                         size += len(chunk)
+                        if size // 10485760 != (size - len(chunk)) // 10485760:
+                            print("    {} MB...".format(size // 1048576))
             if size < 10000:
                 remove(temp)
                 raise RuntimeError("file is too small ({} bytes)".format(size))
@@ -254,6 +263,13 @@ def main():
     parser.add_argument("username", nargs="?", help="TikTok username (with or without @, or a profile link)")
     parser.add_argument("--out", default=OUTPUTS, help="Folder to save into (default: a-Shell/TikTok Outputs)")
     args = parser.parse_args()
+
+    # a-Shell isn't a real terminal, without this nothing shows up until the script ends
+    try:
+        stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    setdefaulttimeout(60)
 
     username = args.username or input("TikTok username: ")
     username = sub(r"^.*tiktok\.com/@", "", username.strip()).lstrip("@").split("/")[0].split("?")[0]
