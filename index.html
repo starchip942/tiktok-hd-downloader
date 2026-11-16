@@ -115,6 +115,7 @@
       <div class="row">
         <label><input type="checkbox" id="wantVideos" checked> Videos</label>
         <label><input type="checkbox" id="wantPhotos" checked> Photos</label>
+        <label><input type="checkbox" id="wantStories" checked> Stories</label>
         <label><input type="checkbox" id="skipDone" checked> Skip saved</label>
       </div>
       <div class="row">
@@ -122,7 +123,7 @@
         <button type="button" class="ghost" id="stop" style="display:none">Stop</button>
       </div>
       <div class="progress" id="bar"><div></div></div>
-      <p class="hint">Videos come from MusicallyDown's HD original; photo posts are saved as full-size JPGs, one per slide. Keep this page open while it works. Safari may ask before each download &mdash; tap Download.</p>
+      <p class="hint">Videos come from MusicallyDown's HD original; photo posts are saved as full-size JPGs, one per slide. Stories go first because they disappear after 24 hours. Keep this page open while it works. Safari may ask before each download &mdash; tap Download.</p>
       <div class="list" id="list"></div>
     </div>
   </div>
@@ -193,8 +194,8 @@ async function api(params) {
   return data;
 }
 
-async function saveFile(url, name) {
-  const res = await fetch(API + "?" + new URLSearchParams({ file: url, name }));
+async function saveFile(url, name, cookie) {
+  const res = await fetch(API + "?" + new URLSearchParams(cookie ? { file: url, name, cookie } : { file: url, name }));
   const type = res.headers.get("Content-Type") || "";
   if (!res.ok || type.includes("json")) throw new Error("file download failed");
   const blob = await res.blob();
@@ -209,7 +210,7 @@ async function saveFile(url, name) {
 function setItem(post, text, cls = "") { const el = post.el.querySelector(".s"); el.textContent = text; el.className = "s " + cls; }
 
 async function downloadPost(post) {
-  const user = profile.username, base = day(post.time) + "_" + post.id;
+  const user = profile.username, base = day(post.time) + "_" + post.id + (post.story ? "_story" : "");
   if (post.photo) {
     let saved = 0;
     for (let n = 0; n < post.images.length; n++) {
@@ -223,6 +224,7 @@ async function downloadPost(post) {
     if (saved < post.images.length) throw new Error(`only ${saved} of ${post.images.length} slides saved`);
     return `Saved ${saved} slides`;
   }
+  if (post.story) return downloadStoryVideo(post, user, base);
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       setItem(post, attempt > 1 ? `Retrying (${attempt}/3)…` : "Asking MusicallyDown…", "busy");
@@ -237,6 +239,31 @@ async function downloadPost(post) {
       await sleep(8000 * attempt);
     }
   }
+}
+
+// story videos: MusicallyDown's HD original if it has one, otherwise TikTok's own best file (no watermark either)
+async function downloadStoryVideo(post, user, base) {
+  let link = null;
+  try {
+    setItem(post, "Asking MusicallyDown…", "busy");
+    link = await api({ url: `https://www.tiktok.com/@${user}/video/${post.id}` });
+    if (link.hd) {
+      setItem(post, "Downloading HD original…", "busy");
+      let size;
+      try { size = await saveFile(link.proxied, base + ".mp4"); } catch (e) { size = await saveFile(link.direct, base + ".mp4"); }
+      return `Saved ${(size / 1048576).toFixed(1)} MB · HD`;
+    }
+  } catch (e) {}
+  setItem(post, "Downloading TikTok's best quality…", "busy");
+  for (const url of post.videoUrls || []) {
+    try { const size = await saveFile(url, base + ".mp4", profile.cookie); return `Saved ${(size / 1048576).toFixed(1)} MB · best available`; } catch (e) {}
+  }
+  if (link) {
+    for (const url of [link.proxied, link.direct]) {
+      try { const size = await saveFile(url, base + ".mp4"); return `Saved ${(size / 1048576).toFixed(1)} MB · no HD available`; } catch (e) {}
+    }
+  }
+  throw new Error("no working link for this story");
 }
 
 async function runOne(post) {
@@ -255,7 +282,7 @@ function addPost(post) {
   const thumb = post.cover || (post.images[0] && post.images[0][0]);
   if (thumb) el.querySelector("img").src = thumb;
   el.querySelector("img").onerror = function () { this.style.visibility = "hidden"; };
-  el.querySelector(".t").textContent = (post.photo ? `Photos (${post.images.length})` : "Video") + " · " + day(post.time);
+  el.querySelector(".t").textContent = (post.story ? "Story · " : "") + (post.photo ? `Photos (${post.images.length})` : "Video") + " · " + day(post.time);
   el.querySelector(".d").textContent = post.desc || "";
   el.querySelector("button").onclick = () => { if (!running) runOne(post); };
   post.el = el;
@@ -264,8 +291,33 @@ function addPost(post) {
 }
 
 function updateSummary(finished) {
-  const v = posts.filter((p) => !p.photo).length, ph = posts.length - v;
-  $("summary").textContent = `@${profile.username}: ${v} videos, ${ph} photo posts${finished ? "" : " (still looking…)"}`;
+  const st = posts.filter((p) => p.story).length;
+  const v = posts.filter((p) => !p.photo && !p.story).length, ph = posts.length - v - st;
+  $("summary").textContent = `@${profile.username}: ${v} videos, ${ph} photo posts, ${st} stories${finished ? "" : " (still looking…)"}`;
+}
+
+// current stories: they go at the top of the list
+async function listStories(saved) {
+  if (!profile.userId) return "";
+  let cursor = 0, device = profile.device, pages = 0;
+  const seen = new Set(), found = [];
+  try {
+    while (pages++ < 10) {
+      const page = await api({ stories: profile.userId, cookie: profile.cookie, device, cursor });
+      if (page.cookie) profile.cookie = [profile.cookie, page.cookie].filter(Boolean).join("; ");
+      const fresh = page.items.filter((i) => !seen.has(i.id));
+      if (!fresh.length) break;
+      for (const p of fresh) { seen.add(p.id); p.saved = saved.has(p.id); found.push(p); }
+      if (page.done) break;
+      cursor = page.cursor;
+      await pause(0.5, 1);
+    }
+  } catch (e) {
+    return " (couldn't load stories: " + e.message + ")";
+  }
+  const first = $("list").firstChild;
+  for (const p of found) { posts.push(p); addPost(p); if (first) $("list").insertBefore(p.el, first); }
+  return "";
 }
 
 $("pform").onsubmit = async (e) => {
@@ -296,8 +348,10 @@ $("pform").onsubmit = async (e) => {
       cursor = page.cursor;
       await pause(1, 2);
     }
+    pstatus("Checking for stories…");
+    const storyNote = await listStories(saved);
     updateSummary(true);
-    pstatus(posts.length ? "Ready. Tap “Download all” or Get on any post." : "No posts found.", !posts.length);
+    pstatus(posts.length ? "Ready" + storyNote + ". Tap “Download all” or Get on any post." : "No posts found" + storyNote + ".", !posts.length);
   } catch (err) {
     pstatus("Couldn't list the profile: " + err.message, true);
   } finally {
@@ -307,9 +361,11 @@ $("pform").onsubmit = async (e) => {
 
 $("all").onclick = async () => {
   if (running || !posts.length) return;
-  const todo = posts.filter((p) => (p.photo ? $("wantPhotos").checked : $("wantVideos").checked) && !(p.saved && $("skipDone").checked));
-  // photos first: their image links expire after a day or two
-  todo.sort((a, b) => b.photo - a.photo);
+  const wanted = (p) => p.story ? $("wantStories").checked : p.photo ? $("wantPhotos").checked : $("wantVideos").checked;
+  const todo = posts.filter((p) => wanted(p) && !(p.saved && $("skipDone").checked));
+  // stories first (gone after 24h), then photos (their links expire in a day or two), then videos
+  const rank = (p) => p.story ? 0 : p.photo ? 1 : 2;
+  todo.sort((a, b) => rank(a) - rank(b));
   if (!todo.length) return pstatus("Nothing left to download.");
   running = true; stopAsked = false;
   $("all").disabled = true; $("stop").style.display = ""; $("bar").style.display = "block";

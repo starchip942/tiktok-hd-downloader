@@ -153,6 +153,7 @@ async function profileInfo(username) {
       ok: true,
       username,
       nickname: info.user.nickname || username,
+      userId: info.user.id || null,
       count: (info.stats && info.stats.videoCount) ?? null,
       secUid,
       cookie: cookiesFrom(r),
@@ -207,14 +208,65 @@ async function profilePage(p) {
   return { ok: true, items, cursor: next, done };
 }
 
+
+// a profile's current stories (TikTok's web story list, the same one gallery-dl uses)
+async function storyPage(p) {
+  const query = new URLSearchParams({
+    aid: "1988", app_language: "en", app_name: "tiktok_web", browser_language: "en-US",
+    browser_name: "Mozilla", browser_online: "true", browser_platform: "Win32",
+    browser_version: "5.0 (Windows)", channel: "tiktok_web", cookie_enabled: "true",
+    device_id: p.device, device_platform: "web_pc", focus_state: "true", from_page: "user",
+    history_len: "2", is_fullscreen: "false", is_page_visible: "true", language: "en", os: "windows",
+    priority_region: "", referer: "", region: "US", screen_height: "1080", screen_width: "1920",
+    tz_name: "UTC", webcast_language: "en", authorId: p.authorId, loadBackward: "false", count: "5",
+    cursor: String(p.cursor || 0),
+  });
+  const r = await fetch(`${TIKTOK}/api/story/item_list/?${query}`, {
+    headers: {
+      "User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9", Referer: TIKTOK + "/",
+      ...(p.cookie ? { Cookie: p.cookie } : {}),
+    },
+  });
+  const body = await r.text();
+  let page = {};
+  try { page = body.trim() ? JSON.parse(body) : {}; } catch (e) {
+    return { ok: false, error: "TikTok's story list answered with something unexpected", debug: { status: r.status, start: body.slice(0, 200) } };
+  }
+  const list = page.itemList || page.ItemList || [];
+  const items = list.filter((i) => i.id).map((i) => {
+    const photo = Boolean(i.imagePost);
+    const v = i.video || {};
+    // best bitrate first, then the normal play address (both are watermark-free)
+    const rates = (v.bitrateInfo || []).slice().sort((a, b) => (b.Bitrate || 0) - (a.Bitrate || 0));
+    const videoUrls = [];
+    for (const b of rates) for (const u of (b.PlayAddr && b.PlayAddr.UrlList) || []) videoUrls.push(u);
+    if (v.playAddr) videoUrls.push(v.playAddr);
+    return {
+      id: i.id,
+      time: Number(i.createTime || 0),
+      photo,
+      story: true,
+      desc: (i.desc || "").slice(0, 120),
+      cover: v.cover || v.originCover ||
+        (photo && i.imagePost.cover && i.imagePost.cover.imageURL && i.imagePost.cover.imageURL.urlList[0]) || null,
+      images: photo ? (i.imagePost.images || []).map((im) => (im.imageURL && im.imageURL.urlList) || []) : [],
+      videoUrls: photo ? [] : [...new Set(videoUrls)],
+    };
+  });
+  const more = page.HasMoreAfter ?? page.hasMoreAfter ?? page.hasMore ?? false;
+  const cursor = page.MaxCursor ?? page.maxCursor ?? page.cursor ?? 0;
+  return { ok: true, items, cursor, done: !more || !items.length, cookie: cookiesFrom(r) || undefined };
+}
+
 // stream a TikTok / MusicallyDown file back with CORS, so the page can save it with a proper name
 const FILE_HOSTS = /(^|\.)(tiktokcdn\.com|tiktokcdn-us\.com|tiktokcdn-eu\.com|tokcdn\.com|muscdn\.app|ibyteimg\.com|tiktok\.com|byteoversea\.com|musicaldown\.com)$/i;
 
-async function proxyFile(fileUrl, name) {
+async function proxyFile(fileUrl, name, cookie) {
   let host;
   try { host = new URL(fileUrl).hostname; } catch (e) { return json({ ok: false, error: "bad file link" }, 400); }
   if (!FILE_HOSTS.test(host)) return json({ ok: false, error: "that host is not allowed" }, 400);
-  const r = await fetch(fileUrl, { headers: { "User-Agent": USER_AGENT, Referer: TIKTOK + "/" } });
+  const sendCookie = cookie && /(^|\.)tiktok\.com$/i.test(host);
+  const r = await fetch(fileUrl, { headers: { "User-Agent": USER_AGENT, Referer: TIKTOK + "/", ...(sendCookie ? { Cookie: cookie } : {}) } });
   const type = r.headers.get("Content-Type") || "application/octet-stream";
   if (!r.ok || type.includes("html")) return json({ ok: false, error: `file server said ${r.status}` }, 502);
   const headers = { ...CORS, "Content-Type": type, "Access-Control-Expose-Headers": "Content-Length" };
@@ -229,7 +281,15 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     const params = new URL(request.url).searchParams;
     try {
-      if (params.get("file")) return await proxyFile(params.get("file"), params.get("name"));
+      if (params.get("file")) return await proxyFile(params.get("file"), params.get("name"), params.get("cookie"));
+      if (params.get("stories")) {
+        return json(await storyPage({
+          authorId: params.get("stories"),
+          cursor: params.get("cursor") || 0,
+          device: params.get("device") || randomDeviceId(),
+          cookie: params.get("cookie") || "",
+        }));
+      }
       if (params.get("profile")) {
         const username = params.get("profile").trim().replace(/^.*tiktok\.com\/@/i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
         if (!/^[\w.]{1,40}$/.test(username)) return json({ ok: false, error: "that doesn't look like a username" }, 400);
