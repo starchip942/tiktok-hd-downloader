@@ -130,16 +130,45 @@ function render() {
   status(`Showing ${shown.length} of ${total}.`);
 }
 
+// ---------- wrong-password limit (per device) ----------
+// 10 wrong tries locks this device for 1 hour; a warning shows from the 7th try
+const MAX_TRIES = 10, WARN_FROM = 7, LOCK_MS = 60 * 60 * 1000;
+let memTries = { count: 0, lockedUntil: 0 };
+function getTries() { try { return JSON.parse(localStorage.getItem("logTries")) || memTries; } catch (e) { return memTries; } }
+function setTries(t) { memTries = t; try { localStorage.setItem("logTries", JSON.stringify(t)); } catch (e) {} }
+function lockMessage(t) {
+  const minutes = Math.max(1, Math.ceil((t.lockedUntil - Date.now()) / 60000));
+  return `Too many wrong tries. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+}
+function showLock() {
+  const t = getTries();
+  if (t.lockedUntil > Date.now()) { status(lockMessage(t), true); return true; }
+  if (t.lockedUntil) setTries({ count: 0, lockedUntil: 0 }); // lock is over: start fresh
+  return false;
+}
+
 $("login").onsubmit = async (e) => {
   e.preventDefault();
+  if (showLock()) { $("pw").value = ""; return; }
   password = $("pw").value;
   status("Opening…");
   try {
     await load();
+    setTries({ count: 0, lockedUntil: 0 });
     $("pw").value = "";
     $("login").style.display = "none"; $("app").style.display = "block";
-  } catch (err) { status(err.message === "wrong password" ? "Wrong password." : "Couldn't open the log: " + err.message, true); }
+  } catch (err) {
+    $("pw").value = "";
+    if (err.message !== "wrong password") return status("Couldn't open the log: " + err.message, true);
+    const t = getTries();
+    t.count += 1;
+    const left = MAX_TRIES - t.count;
+    if (left <= 0) { t.lockedUntil = Date.now() + LOCK_MS; setTries(t); return status(lockMessage(t), true); }
+    setTries(t);
+    status(t.count >= WARN_FROM ? `Wrong password. ${left} tr${left === 1 ? "y" : "ies"} left.` : "Wrong password.", true);
+  }
 };
+showLock();
 $("refresh").onclick = () => load().catch((e) => status(e.message, true));
 $("more").onclick = () => load(true).catch((e) => status(e.message, true));
 ["q", "fDevice", "fKind"].forEach((id) => $(id).addEventListener("input", render));
