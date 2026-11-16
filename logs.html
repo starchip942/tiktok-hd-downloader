@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Download log</title>
+<style>
+  :root { --bg:#0e0e11; --card:#18181d; --line:#2a2a31; --text:#f2f2f5; --muted:#9a9aa5; --accent:#fe2c55; --accent2:#25f4ee; --ok:#22c55e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; padding:32px 18px; }
+  main { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin: 0 0 18px; }
+  h1 span { color: var(--accent); }
+  input, select { font-size:1rem; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--text); outline:none; }
+  input:focus, select:focus { border-color: var(--accent2); }
+  button { font-size:1rem; font-weight:650; padding:12px 18px; border-radius:12px; border:0; cursor:pointer; background:var(--accent); color:#fff; }
+  button.ghost { background:var(--card); border:1px solid var(--line); color:var(--text); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex: 1 1 160px; }
+  .status { color:var(--muted); margin:12px 0; min-height:1.3em; }
+  .status.err { color:#ff6b81; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin:16px 0; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; }
+  .stat b { display:block; font-size:1.4rem; }
+  .stat span { color:var(--muted); font-size:.85rem; }
+  .table { background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+  td.link { white-space:normal; word-break:break-all; min-width:220px; }
+  a { color:var(--accent2); }
+  .tag { font-size:.75rem; font-weight:700; padding:2px 8px; border-radius:99px; background:var(--line); }
+  .hd { color:var(--ok); font-weight:700; }
+  #more { width:100%; margin-top:10px; display:none; }
+  #app { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Download <span>log</span></h1>
+
+  <form id="login" class="row">
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <button type="submit" style="flex:0 0 auto">Open</button>
+  </form>
+  <div class="status" id="status"></div>
+
+  <div id="app">
+    <div class="stats" id="stats"></div>
+    <div class="row" style="margin-bottom:10px">
+      <input id="q" placeholder="Search links or profiles">
+      <select id="fDevice"><option value="">All devices</option></select>
+      <select id="fKind"><option value="">All types</option></select>
+      <button type="button" class="ghost" id="refresh" style="flex:0 0 auto">Refresh</button>
+    </div>
+    <div class="table">
+      <table>
+        <thead><tr><th>Time</th><th>Device</th><th>Type</th><th>Profile</th><th>Quality</th><th>Link</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <button type="button" class="ghost" id="more">Load older</button>
+  </div>
+</main>
+<script>
+const API = "https://asafa.metesahin10.workers.dev/";
+const $ = (id) => document.getElementById(id);
+const KIND = { single: "One link", video: "Video", photo: "Photos", story: "Story", "story-photo": "Story photos" };
+let password = "", rows = [], total = 0;
+
+const status = (t, err = false) => { $("status").textContent = t; $("status").className = "status" + (err ? " err" : ""); };
+
+async function load(older = false) {
+  const before = older && rows.length ? rows[rows.length - 1].id : "";
+  const res = await fetch(API + "?logs=1&limit=500" + (before ? "&before=" + before : ""), { headers: { "X-Password": password } });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error);
+  rows = older ? rows.concat(data.rows) : data.rows;
+  total = data.total;
+  render();
+}
+
+function options(select, values, label) {
+  const current = select.value;
+  select.innerHTML = `<option value="">${label}</option>` + [...values].sort().map((v) => `<option></option>`).join("");
+  [...values].sort().forEach((v, i) => { select.options[i + 1].value = v; select.options[i + 1].textContent = KIND[v] || v; });
+  select.value = current;
+}
+
+function render() {
+  const devices = new Set(rows.map((r) => r.device || "Unknown"));
+  const kinds = new Set(rows.map((r) => r.kind || "single"));
+  options($("fDevice"), devices, "All devices");
+  options($("fKind"), kinds, "All types");
+
+  const q = $("q").value.trim().toLowerCase(), d = $("fDevice").value, k = $("fKind").value;
+  const shown = rows.filter((r) =>
+    (!d || (r.device || "Unknown") === d) && (!k || (r.kind || "single") === k) &&
+    (!q || (r.link || "").toLowerCase().includes(q) || (r.profile || "").toLowerCase().includes(q)));
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayCount = rows.filter((r) => r.ts >= today.getTime()).length;
+  const top = [...devices].map((x) => [x, rows.filter((r) => (r.device || "Unknown") === x).length]).sort((a, b) => b[1] - a[1])[0];
+  $("stats").innerHTML = "";
+  [[total, "downloads in total"], [todayCount, "today"], [devices.size, "devices"], [top ? top[0] : "-", "most active device"]].forEach(([v, l]) => {
+    const el = document.createElement("div"); el.className = "stat";
+    el.innerHTML = "<b></b><span></span>"; el.querySelector("b").textContent = v; el.querySelector("span").textContent = l;
+    $("stats").appendChild(el);
+  });
+
+  const body = $("rows"); body.innerHTML = "";
+  for (const r of shown) {
+    const tr = document.createElement("tr");
+    const cells = [
+      new Date(r.ts).toLocaleString(),
+      r.device || "Unknown",
+      KIND[r.kind] || r.kind || "One link",
+      r.profile ? "@" + r.profile : "",
+      r.hd === 1 ? "HD" : r.hd === 0 ? "Normal" : "",
+    ];
+    cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 4 && c === "HD") td.className = "hd"; tr.appendChild(td); });
+    const td = document.createElement("td"); td.className = "link";
+    if (r.link && /^https:\/\//.test(r.link)) { const a = document.createElement("a"); a.href = r.link; a.target = "_blank"; a.rel = "noreferrer"; a.textContent = r.link; td.appendChild(a); }
+    else td.textContent = r.link || "";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  $("more").style.display = rows.length < total ? "block" : "none";
+  status(`Showing ${shown.length} of ${total}.`);
+}
+
+$("login").onsubmit = async (e) => {
+  e.preventDefault();
+  password = $("pw").value;
+  status("Opening…");
+  try {
+    await load();
+    try { sessionStorage.setItem("logpw", password); } catch (e) {}
+    $("login").style.display = "none"; $("app").style.display = "block";
+  } catch (err) { status(err.message === "wrong password" ? "Wrong password." : "Couldn't open the log: " + err.message, true); }
+};
+$("refresh").onclick = () => load().catch((e) => status(e.message, true));
+$("more").onclick = () => load(true).catch((e) => status(e.message, true));
+["q", "fDevice", "fKind"].forEach((id) => $(id).addEventListener("input", render));
+
+try { const saved = sessionStorage.getItem("logpw"); if (saved) { $("pw").value = saved; $("login").requestSubmit(); } } catch (e) {}
+</script>
+</body>
+</html>

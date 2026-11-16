@@ -155,6 +155,8 @@ async function getVideo(link) {
     $("badge").textContent = data.hd ? "HD original" : "SD only";
     $("badge").className = "badge " + (data.hd ? "hd" : "sd");
     $("dl").href = data.proxied;
+    const entry = { kind: "single", link, hd: data.hd };
+    $("dl").onclick = $("open").onclick = () => logDownload({ ...entry });
     $("open").href = data.direct;
     const v = $("preview");
     v.style.display = "block";
@@ -170,6 +172,61 @@ async function getVideo(link) {
 }
 
 $("form").onsubmit = (e) => { e.preventDefault(); getVideo($("url").value.trim()); };
+
+
+// ---------- device name + download log ----------
+// Samsung reports model codes (SM-S911B); turn the common ones into real names
+const SAMSUNG = {
+  G991: "Galaxy S21", G996: "Galaxy S21+", G998: "Galaxy S21 Ultra", G990: "Galaxy S21 FE",
+  G981: "Galaxy S20", G986: "Galaxy S20+", G988: "Galaxy S20 Ultra", G780: "Galaxy S20 FE", G781: "Galaxy S20 FE",
+  S901: "Galaxy S22", S906: "Galaxy S22+", S908: "Galaxy S22 Ultra",
+  S911: "Galaxy S23", S916: "Galaxy S23+", S918: "Galaxy S23 Ultra", S711: "Galaxy S23 FE",
+  S921: "Galaxy S24", S926: "Galaxy S24+", S928: "Galaxy S24 Ultra", S721: "Galaxy S24 FE",
+  S931: "Galaxy S25", S936: "Galaxy S25+", S938: "Galaxy S25 Ultra", S937: "Galaxy S25 Edge", S731: "Galaxy S25 FE",
+  N970: "Galaxy Note10", N975: "Galaxy Note10+", N980: "Galaxy Note20", N981: "Galaxy Note20", N985: "Galaxy Note20 Ultra", N986: "Galaxy Note20 Ultra",
+  F926: "Galaxy Z Fold3", F711: "Galaxy Z Flip3", F936: "Galaxy Z Fold4", F721: "Galaxy Z Flip4",
+  F946: "Galaxy Z Fold5", F731: "Galaxy Z Flip5", F956: "Galaxy Z Fold6", F741: "Galaxy Z Flip6",
+  F966: "Galaxy Z Fold7", F766: "Galaxy Z Flip7", F761: "Galaxy Z Flip7 FE",
+  A505: "Galaxy A50", A515: "Galaxy A51", A715: "Galaxy A71", A325: "Galaxy A32", A336: "Galaxy A33",
+  A525: "Galaxy A52", A526: "Galaxy A52 5G", A528: "Galaxy A52s", A725: "Galaxy A72", A536: "Galaxy A53",
+  A546: "Galaxy A54", A556: "Galaxy A55", A566: "Galaxy A56", A346: "Galaxy A34", A356: "Galaxy A35", A366: "Galaxy A36",
+  A135: "Galaxy A13", A137: "Galaxy A13", A235: "Galaxy A23", A236: "Galaxy A23 5G",
+  A145: "Galaxy A14", A146: "Galaxy A14 5G", A155: "Galaxy A15", A156: "Galaxy A15 5G",
+  A165: "Galaxy A16", A166: "Galaxy A16 5G", A245: "Galaxy A24", A256: "Galaxy A25", A266: "Galaxy A26", A057: "Galaxy A05s",
+};
+function niceModel(model) {
+  model = (model || "").trim();
+  const sm = model.match(/^SM-([A-Z]\d{3})/i);
+  if (sm) return SAMSUNG[sm[1].toUpperCase()] || "Samsung " + model;
+  return model;
+}
+let deviceName = null;
+async function getDevice() {
+  if (deviceName) return deviceName;
+  const ua = navigator.userAgent;
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return (deviceName = "iPad");
+  if (/iPhone|iPod/.test(ua)) return (deviceName = "iPhone");
+  if (/Android/i.test(ua)) {
+    let model = "";
+    try {
+      if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues)
+        model = (await navigator.userAgentData.getHighEntropyValues(["model"])).model || "";
+    } catch (e) {}
+    if (!model) { const m = ua.match(/Android [^;)]*;\s*([^;)]+?)(?:\s+Build|\))/); if (m && m[1] !== "K") model = m[1]; }
+    const tablet = !/Mobile/.test(ua);
+    return (deviceName = niceModel(model) || (tablet ? "Android tablet" : "Android phone"));
+  }
+  if (/CrOS/.test(ua)) return (deviceName = "Chromebook");
+  if (/Macintosh/.test(ua)) return (deviceName = "Mac");
+  return (deviceName = "PC");
+}
+async function logDownload(entry) {
+  try {
+    entry.device = await getDevice();
+    await fetch(API + "?log=1", { method: "POST", body: JSON.stringify(entry), keepalive: true });
+  } catch (e) {}
+}
+getDevice();
 
 // ---------- tabs ----------
 document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
@@ -270,6 +327,12 @@ async function runOne(post) {
   try {
     const msg = await downloadPost(post);
     markSaved(profile.username, post.id); post.saved = true;
+    logDownload({
+      kind: (post.story ? "story" : "") + (post.photo ? (post.story ? "-photo" : "photo") : (post.story ? "" : "video")),
+      link: `https://www.tiktok.com/@${profile.username}/${post.photo ? "photo" : "video"}/${post.id}`,
+      profile: profile.username,
+      hd: post.photo ? null : / · HD$/.test(msg),
+    });
     setItem(post, msg, "ok");
     return true;
   } catch (e) { setItem(post, "Failed: " + e.message + " (tap Get to retry)", "err"); return false; }

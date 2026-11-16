@@ -8,7 +8,7 @@ const USER_AGENT =
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "*",
 };
 
@@ -276,11 +276,51 @@ async function proxyFile(fileUrl, name, cookie) {
   return new Response(r.body, { headers });
 }
 
+// ---------- download log (Cloudflare D1 database bound as DB) ----------
+
+let tableReady = false;
+async function ensureTable(db) {
+  if (tableReady) return;
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT, link TEXT, profile TEXT, hd INTEGER, device TEXT, ua TEXT)"
+  ).run();
+  tableReady = true;
+}
+
+const clip = (v, n) => (v == null ? null : String(v).slice(0, n));
+
+async function addLog(request, env) {
+  if (!env.DB) return json({ ok: false, error: "no database connected" }, 200);
+  let body = {};
+  try { body = JSON.parse(await request.text()); } catch (e) { return json({ ok: false, error: "bad log" }, 400); }
+  await ensureTable(env.DB);
+  await env.DB.prepare("INSERT INTO logs (ts, kind, link, profile, hd, device, ua) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(Date.now(), clip(body.kind, 20), clip(body.link, 300), clip(body.profile, 60),
+      body.hd == null ? null : (body.hd ? 1 : 0), clip(body.device, 80), clip(request.headers.get("User-Agent"), 250))
+    .run();
+  return json({ ok: true });
+}
+
+async function readLogs(request, env, params) {
+  if (!env.LOG_PASSWORD) return json({ ok: false, error: "no LOG_PASSWORD set on the helper yet" }, 500);
+  if (request.headers.get("X-Password") !== env.LOG_PASSWORD) return json({ ok: false, error: "wrong password" }, 401);
+  if (!env.DB) return json({ ok: false, error: "no database connected" }, 500);
+  await ensureTable(env.DB);
+  const limit = Math.min(Number(params.get("limit")) || 200, 1000);
+  const before = Number(params.get("before")) || Number.MAX_SAFE_INTEGER;
+  const { results } = await env.DB.prepare("SELECT id, ts, kind, link, profile, hd, device FROM logs WHERE id < ? ORDER BY id DESC LIMIT ?")
+    .bind(before, limit).all();
+  const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM logs").first("n");
+  return json({ ok: true, rows: results, total });
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     const params = new URL(request.url).searchParams;
     try {
+      if (params.has("log") && request.method === "POST") return await addLog(request, env);
+      if (params.has("logs")) return await readLogs(request, env, params);
       if (params.get("file")) return await proxyFile(params.get("file"), params.get("name"), params.get("cookie"));
       if (params.get("stories")) {
         return json(await storyPage({
