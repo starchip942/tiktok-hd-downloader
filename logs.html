@@ -41,7 +41,7 @@
   <h1>Download <span>log</span></h1>
 
   <form id="login" class="row">
-    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <input id="pw" type="password" placeholder="Password" autocomplete="off">
     <button type="submit" style="flex:0 0 auto">Open</button>
   </form>
   <div class="status" id="status"></div>
@@ -136,7 +136,7 @@ $("login").onsubmit = async (e) => {
   status("Opening…");
   try {
     await load();
-    try { sessionStorage.setItem("logpw", password); } catch (e) {}
+    $("pw").value = "";
     $("login").style.display = "none"; $("app").style.display = "block";
   } catch (err) { status(err.message === "wrong password" ? "Wrong password." : "Couldn't open the log: " + err.message, true); }
 };
@@ -144,7 +144,8 @@ $("refresh").onclick = () => load().catch((e) => status(e.message, true));
 $("more").onclick = () => load(true).catch((e) => status(e.message, true));
 ["q", "fDevice", "fKind"].forEach((id) => $(id).addEventListener("input", render));
 
-try { const saved = sessionStorage.getItem("logpw"); if (saved) { $("pw").value = saved; $("login").requestSubmit(); } } catch (e) {}
+// never keep the password: clear anything an older version saved, and wipe the box after use
+try { sessionStorage.removeItem("logpw"); } catch (e) {}
 </script>
 </body>
 </html>
