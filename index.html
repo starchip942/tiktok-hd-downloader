@@ -120,11 +120,11 @@
         <label><input type="checkbox" id="skipDone" checked> Skip saved</label>
       </div>
       <div class="row">
-        <button type="button" class="primary" id="all">Download all, one by one</button>
+        <button type="button" class="primary" id="all">Download all as .zip</button>
         <button type="button" class="ghost" id="stop" style="display:none">Stop</button>
       </div>
       <div class="progress" id="bar"><div></div></div>
-      <p class="hint">Videos come from MusicallyDown's HD original; photo posts are saved as full-size JPGs, one per slide. Stories go first because they disappear after 24 hours. Keep this page open while it works. Safari may ask before each download &mdash; tap Download.</p>
+      <button type="button" class="primary" id="savezip" style="display:none;width:100%;margin-top:10px;background:var(--ok)"></button>
       <div class="list" id="list"></div>
     </div>
   </div>
@@ -405,8 +405,79 @@ async function api(params) {
   return data;
 }
 
+// ---------- .zip (stored, no compression: videos and photos don't shrink anyway) ----------
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u8) { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+
+const ZIP_PART_LIMIT = 500 * 1048576; // ~500 MB per zip so Safari doesn't run out of memory
+let zip = null; // { entries: [{ name, bytes, crc }], size, posts: [] }
+
+function dosTime(d) {
+  return { time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+           date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() };
+}
+function buildZip(entries) {
+  const enc = new TextEncoder(), { time, date } = dosTime(new Date()); // files get today's date
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name), size = e.bytes.length;
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+    h.setUint16(10, time, true); h.setUint16(12, date, true); h.setUint32(14, e.crc, true);
+    h.setUint32(18, size, true); h.setUint32(22, size, true); h.setUint16(26, name.length, true); h.setUint16(28, 0, true);
+    parts.push(h.buffer, name, e.bytes);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint16(10, 0, true); c.setUint16(12, time, true); c.setUint16(14, date, true); c.setUint32(16, e.crc, true);
+    c.setUint32(20, size, true); c.setUint32(24, size, true); c.setUint16(28, name.length, true);
+    c.setUint32(42, offset, true);
+    central.push(c.buffer, name);
+    offset += 30 + name.length + size;
+  }
+  const cdSize = central.reduce((n, x) => n + x.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end.buffer], { type: "application/zip" });
+}
+
+let zipPartNo = 0, zipWaiter = null;
+// show the green "Save zip" button and wait until it's tapped (a tap is needed for Safari to allow the download)
+function offerZip(final) {
+  const part = zip; zip = { entries: [], size: 0, posts: [] };
+  if (!part.entries.length) return Promise.resolve();
+  zipPartNo++;
+  const name = `${profile.username}${final && zipPartNo === 1 ? "" : "_part" + zipPartNo}.zip`;
+  const btn = $("savezip");
+  btn.style.display = "block";
+  btn.textContent = `Save ${name} (${(part.size / 1048576).toFixed(0)} MB, ${part.entries.length} files)`;
+  if (!final) pstatus(`Zip part ${zipPartNo} is full. Tap the green button to save it and keep going.`);
+  return new Promise((resolve) => {
+    zipWaiter = resolve;
+    btn.onclick = () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(buildZip(part.entries)); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+      for (const p of part.posts) markSaved(profile.username, p.id);
+      btn.style.display = "none"; btn.onclick = null; zipWaiter = null;
+      resolve();
+    };
+  });
+}
+
+async function zipAdd(name, file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (zip.entries.length && zip.size + bytes.length > ZIP_PART_LIMIT) await offerZip(false);
+  const folder = /_story/.test(name) ? "stories/" : /\.jpe?g$/i.test(name) ? "photos/" : "videos/";
+  zip.entries.push({ name: `${profile.username}/${folder}${name}`, bytes, crc: crc32(bytes) });
+  zip.size += bytes.length + 80;
+}
+
 async function saveFile(url, name, cookie) {
   const file = await fetchClean(url, name, cookie);
+  if (zip) { await zipAdd(name, file); return file.size; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(file); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
@@ -481,14 +552,15 @@ async function downloadStoryVideo(post, user, base) {
 async function runOne(post) {
   try {
     const msg = await downloadPost(post);
-    markSaved(profile.username, post.id); post.saved = true;
+    if (zip) zip.posts.push(post); else markSaved(profile.username, post.id);
+    post.saved = true;
     logDownload({
       kind: (post.story ? "story" : "") + (post.photo ? (post.story ? "-photo" : "photo") : (post.story ? "" : "video")),
       link: `https://www.tiktok.com/@${profile.username}/${post.photo ? "photo" : "video"}/${post.id}`,
       profile: profile.username,
       hd: post.photo ? null : / · HD$/.test(msg),
     });
-    setItem(post, msg, "ok");
+    setItem(post, zip ? msg.replace(/^Saved/, "Added") : msg, "ok");
     return true;
   } catch (e) { setItem(post, "Failed: " + e.message + " (tap Get to retry)", "err"); return false; }
 }
@@ -586,6 +658,7 @@ $("all").onclick = async () => {
   todo.sort((a, b) => rank(a) - rank(b));
   if (!todo.length) return pstatus("Nothing left to download.");
   running = true; stopAsked = false;
+  zip = { entries: [], size: 0, posts: [] }; zipPartNo = 0;
   $("all").disabled = true; $("stop").style.display = ""; $("bar").style.display = "block";
   let ok = 0, failed = 0;
   for (let i = 0; i < todo.length && !stopAsked; i++) {
@@ -595,10 +668,20 @@ $("all").onclick = async () => {
     $("bar").firstElementChild.style.width = ((i + 1) / todo.length * 100) + "%";
     if (i < todo.length - 1 && !stopAsked) await pause(2, 4);
   }
-  pstatus(`${stopAsked ? "Stopped. " : "Done. "}${ok} saved, ${failed} failed${failed ? " — tap Download all again to retry them" : ""}.`, failed > 0);
-  running = false; $("all").disabled = false; $("stop").style.display = "none";
+  $("stop").style.display = "none";
+  const failNote = failed ? `, ${failed} failed (tap Download all again later to retry them)` : "";
+  if (zip.entries.length) {
+    pstatus(`${stopAsked ? "Stopped" : "Done"}. ${ok} added${failNote}. Tap the green button to save the zip.`, failed > 0);
+    await offerZip(true);
+    pstatus(`Saved${zipPartNo > 1 ? " in " + zipPartNo + " zip parts" : ""}: ${ok} posts${failNote}.`, failed > 0);
+  } else {
+    pstatus(zipPartNo ? `Saved in ${zipPartNo} zip parts: ${ok} posts${failNote}.` : `${stopAsked ? "Stopped" : "Done"}. Nothing was added${failNote}.`, failed > 0 || !zipPartNo);
+  }
+  zip = null;
+  running = false; $("all").disabled = false;
 };
 $("stop").onclick = () => { stopAsked = true; pstatus("Stopping after this one…"); };
+window.addEventListener("beforeunload", (e) => { if (running) { e.preventDefault(); e.returnValue = ""; } });
 
 // allow links like ?url=https://vt.tiktok.com/... (handy for Shortcuts / share sheets)
 const preset = new URLSearchParams(location.search).get("url");
