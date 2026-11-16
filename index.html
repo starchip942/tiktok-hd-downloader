@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>TikTok HD Downloader</title>
+<style>
+  :root {
+    --bg: #0e0e11; --card: #18181d; --line: #2a2a31; --text: #f2f2f5; --muted: #9a9aa5;
+    --accent: #fe2c55; --accent2: #25f4ee; --ok: #22c55e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex; justify-content: center; padding: 48px 18px;
+  }
+  main { width: 100%; max-width: 620px; }
+  h1 { font-size: 2rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .bar { display: flex; gap: 8px; }
+  input {
+    flex: 1; min-width: 0; font-size: 1.05rem; padding: 15px 16px; border-radius: 14px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text); outline: none;
+  }
+  input:focus { border-color: var(--accent2); }
+  button, .btn {
+    font-size: 1rem; font-weight: 650; padding: 15px 18px; border-radius: 14px; border: 0;
+    cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
+  .primary { background: var(--accent); color: #fff; }
+  .primary:disabled { opacity: .6; cursor: wait; }
+  #go { width: 100%; margin-top: 10px; }
+  .status { margin-top: 16px; color: var(--muted); min-height: 1.4em; }
+  .status.err { color: #ff6b81; }
+  .card {
+    margin-top: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 18px;
+    padding: 16px; display: none;
+  }
+  .card.show { display: block; }
+  video { width: 100%; max-height: 60vh; border-radius: 12px; background: #000; display: block; }
+  .name { margin: 14px 0 4px; font-weight: 650; word-break: break-word; }
+  .badge { display: inline-block; font-size: .8rem; font-weight: 700; padding: 3px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
+  .badge.hd { background: rgba(34,197,94,.15); color: var(--ok); }
+  .badge.sd { background: rgba(250,204,21,.15); color: #facc15; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .hint { color: var(--muted); font-size: .85rem; margin-top: 12px; }
+  footer { color: var(--muted); font-size: .8rem; margin-top: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TikTok <span>HD</span> Downloader</h1>
+  <p class="sub">Paste a TikTok link to get the original, pre-compression video.</p>
+
+  <form id="form">
+    <div class="bar">
+      <input id="url" type="url" placeholder="https://vt.tiktok.com/…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" class="ghost" id="paste">Paste</button>
+    </div>
+    <button type="submit" class="primary" id="go">Get HD video</button>
+  </form>
+
+  <div class="status" id="status"></div>
+
+  <section class="card" id="result">
+    <video id="preview" controls playsinline preload="metadata"></video>
+    <div class="name"><span id="name"></span><span class="badge" id="badge"></span></div>
+    <div class="actions">
+      <a class="btn primary" id="dl" href="#" rel="noreferrer">Download HD</a>
+      <a class="btn ghost" id="open" href="#" target="_blank" rel="noreferrer">Open original</a>
+    </div>
+    <p class="hint">On iPad/iPhone: if the video opens instead of downloading, tap Share → Save Video (or the download arrow in Safari). Links stop working after about an hour.</p>
+  </section>
+
+  <footer>Uses MusicallyDown's HD link. Respect creators' rights.</footer>
+</main>
+
+<script>
+const API = "https://asafa.metesahin10.workers.dev/";
+const $ = (id) => document.getElementById(id);
+const status = (text, err = false) => { $("status").textContent = text; $("status").className = "status" + (err ? " err" : ""); };
+
+$("paste").onclick = async () => {
+  try { $("url").value = (await navigator.clipboard.readText()).trim(); $("url").focus(); }
+  catch (e) { status("Couldn't read the clipboard. Long-press the box and tap Paste.", true); }
+};
+
+async function getVideo(link) {
+  $("result").classList.remove("show");
+  $("preview").removeAttribute("src");
+  if (!/tiktok\.com\//i.test(link)) return status("That doesn't look like a TikTok link.", true);
+  $("go").disabled = true; $("go").textContent = "Getting video…"; status("Asking MusicallyDown for the HD file…");
+  try {
+    const res = await fetch(API + "?url=" + encodeURIComponent(link));
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Something went wrong");
+    const name = (data.filename || "tiktok").replace(/\[HD\]$/, "");
+    $("name").textContent = name;
+    $("badge").textContent = data.hd ? "HD original" : "SD only";
+    $("badge").className = "badge " + (data.hd ? "hd" : "sd");
+    $("dl").href = data.proxied;
+    $("open").href = data.direct;
+    const v = $("preview");
+    v.style.display = "block";
+    v.onerror = () => { if (v.src !== data.proxied) v.src = data.proxied; else v.style.display = "none"; };
+    v.src = data.direct;
+    $("result").classList.add("show");
+    status(data.hd ? "Ready. This is the full-quality original." : "MusicallyDown only had the normal quality for this one.");
+  } catch (e) {
+    status("Couldn't get the video: " + e.message + ". If this keeps happening, try again with the 1.1.1.1 app on.", true);
+  } finally {
+    $("go").disabled = false; $("go").textContent = "Get HD video";
+  }
+}
+
+$("form").onsubmit = (e) => { e.preventDefault(); getVideo($("url").value.trim()); };
+
+// allow links like ?url=https://vt.tiktok.com/... (handy for Shortcuts / share sheets)
+const preset = new URLSearchParams(location.search).get("url");
+if (preset) { $("url").value = preset; getVideo(preset); }
+</script>
+</body>
+</html>
