@@ -120,11 +120,132 @@ async function musicaldown(videoUrl) {
   return { ok: true, hd: Boolean(hd), direct, proxied, filename, debug };
 }
 
+// ---------- whole profiles ----------
+
+const TIKTOK = "https://www.tiktok.com";
+const IPAD_USER_AGENT =
+  "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+
+function randomDeviceId() {
+  return "72" + Array.from({ length: 17 }, () => Math.floor(Math.random() * 10)).join("");
+}
+
+// find the profile and its secUid (needed to list its posts)
+async function profileInfo(username) {
+  const tried = [];
+  for (const ua of [IPAD_USER_AGENT, USER_AGENT]) {
+    const r = await fetch(`${TIKTOK}/@${encodeURIComponent(username)}`, {
+      headers: { "User-Agent": ua, "Accept-Language": "en-US,en;q=0.9", Referer: TIKTOK + "/" },
+    });
+    const html = await r.text();
+    tried.push(r.status);
+    const m = html.match(/<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!m) continue;
+    const scope = JSON.parse(m[1]).__DEFAULT_SCOPE__ || {};
+    const detail = scope["webapp.user-detail"] || {};
+    const info = detail.userInfo || {};
+    const secUid = info.user && info.user.secUid;
+    if (!secUid) {
+      if (detail.statusCode === 10222) return { ok: false, error: `@${username} is a private account` };
+      return { ok: false, error: `could not find @${username} (check the username)` };
+    }
+    return {
+      ok: true,
+      username,
+      nickname: info.user.nickname || username,
+      count: (info.stats && info.stats.videoCount) ?? null,
+      secUid,
+      cookie: cookiesFrom(r),
+      device: randomDeviceId(),
+      cursor: Date.now(),
+    };
+  }
+  return { ok: false, error: "TikTok is blocking the profile page right now, try again in a minute", debug: { tried } };
+}
+
+// one page (about 15 posts) of a profile, walking back in time like the Python script
+async function profilePage(p) {
+  const query = new URLSearchParams({
+    aid: "1988", app_language: "en", app_name: "tiktok_web", browser_language: "en-US",
+    browser_name: "Mozilla", browser_online: "true", browser_platform: "Win32",
+    browser_version: "5.0 (Windows)", channel: "tiktok_web", cookie_enabled: "true",
+    count: "15", cursor: String(p.cursor), device_id: p.device, device_platform: "web_pc",
+    focus_state: "true", from_page: "user", history_len: "2", is_fullscreen: "false",
+    is_page_visible: "true", language: "en", os: "windows", priority_region: "",
+    referer: "", region: "US", screen_height: "1080", screen_width: "1920",
+    secUid: p.secUid, type: "1", tz_name: "UTC",
+    verifyFp: "verify_" + Math.random().toString(16).slice(2, 9), webcast_language: "en",
+  });
+  const r = await fetch(`${TIKTOK}/api/creator/item_list/?${query}`, {
+    headers: {
+      "User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9", Referer: TIKTOK + "/",
+      ...(p.cookie ? { Cookie: p.cookie } : {}),
+    },
+  });
+  const body = await r.text();
+  let page = {};
+  try { page = body.trim() ? JSON.parse(body) : {}; } catch (e) {
+    return { ok: false, error: "TikTok answered with something unexpected", debug: { status: r.status, start: body.slice(0, 200) } };
+  }
+  const list = page.itemList || [];
+  const items = list.filter((i) => i.id).map((i) => {
+    const photo = Boolean(i.imagePost);
+    return {
+      id: i.id,
+      time: Number(i.createTime || 0),
+      photo,
+      desc: (i.desc || "").slice(0, 120),
+      cover: (i.video && (i.video.cover || i.video.originCover)) ||
+        (photo && i.imagePost.cover && i.imagePost.cover.imageURL && i.imagePost.cover.imageURL.urlList[0]) || null,
+      images: photo ? (i.imagePost.images || []).map((im) => (im.imageURL && im.imageURL.urlList) || []) : [],
+    };
+  });
+
+  let next = list.length ? Number(list[list.length - 1].createTime || 0) * 1000 : 0;
+  if (!next || next === Number(p.cursor)) next = Number(p.cursor) - 7 * 86400000; // empty stretch: jump back a week
+  const done = next < 1472706000000 || !page.hasMorePrevious;
+  return { ok: true, items, cursor: next, done };
+}
+
+// stream a TikTok / MusicallyDown file back with CORS, so the page can save it with a proper name
+const FILE_HOSTS = /(^|\.)(tiktokcdn\.com|tiktokcdn-us\.com|tiktokcdn-eu\.com|tokcdn\.com|muscdn\.app|ibyteimg\.com|tiktok\.com|byteoversea\.com|musicaldown\.com)$/i;
+
+async function proxyFile(fileUrl, name) {
+  let host;
+  try { host = new URL(fileUrl).hostname; } catch (e) { return json({ ok: false, error: "bad file link" }, 400); }
+  if (!FILE_HOSTS.test(host)) return json({ ok: false, error: "that host is not allowed" }, 400);
+  const r = await fetch(fileUrl, { headers: { "User-Agent": USER_AGENT, Referer: TIKTOK + "/" } });
+  const type = r.headers.get("Content-Type") || "application/octet-stream";
+  if (!r.ok || type.includes("html")) return json({ ok: false, error: `file server said ${r.status}` }, 502);
+  const headers = { ...CORS, "Content-Type": type, "Access-Control-Expose-Headers": "Content-Length" };
+  const length = r.headers.get("Content-Length");
+  if (length) headers["Content-Length"] = length;
+  if (name) headers["Content-Disposition"] = `attachment; filename="${name.replace(/[^\w.\-]/g, "_")}"`;
+  return new Response(r.body, { headers });
+}
+
 export default {
   async fetch(request) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
-    const url = new URL(request.url).searchParams.get("url");
-    if (!url) return json({ ok: false, error: "add ?url=<tiktok link> to the address" }, 400);
+    const params = new URL(request.url).searchParams;
+    try {
+      if (params.get("file")) return await proxyFile(params.get("file"), params.get("name"));
+      if (params.get("profile")) {
+        const username = params.get("profile").trim().replace(/^.*tiktok\.com\/@/i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
+        if (!/^[\w.]{1,40}$/.test(username)) return json({ ok: false, error: "that doesn't look like a username" }, 400);
+        if (!params.get("secUid")) return json(await profileInfo(username));
+        return json(await profilePage({
+          secUid: params.get("secUid"),
+          cursor: params.get("cursor") || Date.now(),
+          device: params.get("device") || randomDeviceId(),
+          cookie: params.get("cookie") || "",
+        }));
+      }
+    } catch (e) {
+      return json({ ok: false, error: String(e) }, 502);
+    }
+    const url = params.get("url");
+    if (!url) return json({ ok: false, error: "add ?url=<tiktok link> or ?profile=<username> to the address" }, 400);
     if (!/^https?:\/\/([a-z0-9-]+\.)*tiktok\.com\//i.test(url))
       return json({ ok: false, error: "that is not a TikTok link" }, 400);
     try {

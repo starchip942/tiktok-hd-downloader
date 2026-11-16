@@ -48,14 +48,39 @@
   .badge.sd { background: rgba(250,204,21,.15); color: #facc15; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
   .hint { color: var(--muted); font-size: .85rem; margin-top: 12px; }
+  .tabs { display: flex; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 4px; margin-bottom: 18px; }
+  .tabs button { flex: 1; padding: 11px; background: none; color: var(--muted); border-radius: 10px; }
+  .tabs button.on { background: var(--line); color: var(--text); }
+  .panel { display: none; } .panel.on { display: block; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .row label { display: flex; align-items: center; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .row .btn, .row button { flex: 1; }
+  .summary { margin-top: 16px; font-weight: 600; }
+  .progress { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 10px; display: none; }
+  .progress div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .3s; }
+  .list { margin-top: 14px; display: grid; gap: 8px; }
+  .item { display: flex; gap: 12px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px; }
+  .item img { width: 54px; height: 72px; object-fit: cover; border-radius: 8px; background: #000; flex: none; }
+  .item .info { flex: 1; min-width: 0; }
+  .item .t { font-size: .9rem; font-weight: 600; }
+  .item .d { font-size: .8rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .s { font-size: .8rem; margin-top: 2px; color: var(--muted); }
+  .item .s.ok { color: var(--ok); } .item .s.err { color: #ff6b81; } .item .s.busy { color: var(--accent2); }
+  .item button { padding: 10px 12px; font-size: .85rem; flex: none; }
   footer { color: var(--muted); font-size: .8rem; margin-top: 40px; text-align: center; }
 </style>
 </head>
 <body>
 <main>
   <h1>TikTok <span>HD</span> Downloader</h1>
-  <p class="sub">Paste a TikTok link to get the original, pre-compression video.</p>
+  <p class="sub">Original, pre-compression TikTok videos and full-size photos.</p>
 
+  <div class="tabs">
+    <button type="button" class="on" data-tab="single">One link</button>
+    <button type="button" data-tab="profile">Whole profile</button>
+  </div>
+
+  <div class="panel on" id="tab-single">
   <form id="form">
     <div class="bar">
       <input id="url" type="url" placeholder="https://vt.tiktok.com/…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -75,6 +100,32 @@
     </div>
     <p class="hint">On iPad/iPhone: if the video opens instead of downloading, tap Share → Save Video (or the download arrow in Safari). Links stop working after about an hour.</p>
   </section>
+  </div>
+
+  <div class="panel" id="tab-profile">
+    <form id="pform">
+      <div class="bar">
+        <input id="user" placeholder="username or profile link" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+      <button type="submit" class="primary" id="find" style="width:100%;margin-top:10px">Find all posts</button>
+    </form>
+    <div class="status" id="pstatus"></div>
+    <div id="pbox" style="display:none">
+      <div class="summary" id="summary"></div>
+      <div class="row">
+        <label><input type="checkbox" id="wantVideos" checked> Videos</label>
+        <label><input type="checkbox" id="wantPhotos" checked> Photos</label>
+        <label><input type="checkbox" id="skipDone" checked> Skip saved</label>
+      </div>
+      <div class="row">
+        <button type="button" class="primary" id="all">Download all, one by one</button>
+        <button type="button" class="ghost" id="stop" style="display:none">Stop</button>
+      </div>
+      <div class="progress" id="bar"><div></div></div>
+      <p class="hint">Videos come from MusicallyDown's HD original; photo posts are saved as full-size JPGs, one per slide. Keep this page open while it works. Safari may ask before each download &mdash; tap Download.</p>
+      <div class="list" id="list"></div>
+    </div>
+  </div>
 
   <footer>Uses MusicallyDown's HD link. Respect creators' rights.</footer>
 </main>
@@ -118,6 +169,162 @@ async function getVideo(link) {
 }
 
 $("form").onsubmit = (e) => { e.preventDefault(); getVideo($("url").value.trim()); };
+
+// ---------- tabs ----------
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("on", p.id === "tab-" + b.dataset.tab));
+});
+
+// ---------- whole profile ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pause = (a, b) => sleep((a + Math.random() * (b - a)) * 1000);
+const pstatus = (text, err = false) => { $("pstatus").textContent = text; $("pstatus").className = "status" + (err ? " err" : ""); };
+const day = (t) => t ? new Date(t * 1000).toISOString().slice(0, 10) : "unknown-date";
+let profile = null, posts = [], running = false, stopAsked = false;
+
+function savedSet(user) { try { return new Set(JSON.parse(localStorage.getItem("saved:" + user) || "[]")); } catch (e) { return new Set(); } }
+function markSaved(user, id) { try { const s = savedSet(user); s.add(id); localStorage.setItem("saved:" + user, JSON.stringify([...s])); } catch (e) {} }
+
+async function api(params) {
+  const res = await fetch(API + "?" + new URLSearchParams(params));
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || "something went wrong");
+  return data;
+}
+
+async function saveFile(url, name) {
+  const res = await fetch(API + "?" + new URLSearchParams({ file: url, name }));
+  const type = res.headers.get("Content-Type") || "";
+  if (!res.ok || type.includes("json")) throw new Error("file download failed");
+  const blob = await res.blob();
+  if (blob.size < 1000) throw new Error("file was too small");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  return blob.size;
+}
+
+function setItem(post, text, cls = "") { const el = post.el.querySelector(".s"); el.textContent = text; el.className = "s " + cls; }
+
+async function downloadPost(post) {
+  const user = profile.username, base = day(post.time) + "_" + post.id;
+  if (post.photo) {
+    let saved = 0;
+    for (let n = 0; n < post.images.length; n++) {
+      setItem(post, `Saving slide ${n + 1} of ${post.images.length}…`, "busy");
+      const name = `${base}_${String(n + 1).padStart(2, "0")}.jpg`;
+      for (const url of post.images[n]) {
+        try { await saveFile(url, name); saved++; break; } catch (e) {}
+      }
+      await pause(0.5, 1.2);
+    }
+    if (saved < post.images.length) throw new Error(`only ${saved} of ${post.images.length} slides saved`);
+    return `Saved ${saved} slides`;
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      setItem(post, attempt > 1 ? `Retrying (${attempt}/3)…` : "Asking MusicallyDown…", "busy");
+      const link = await api({ url: `https://www.tiktok.com/@${user}/video/${post.id}` });
+      setItem(post, "Downloading " + (link.hd ? "HD original…" : "video (no HD available)…"), "busy");
+      let size;
+      try { size = await saveFile(link.proxied, `${base}${link.hd ? "" : "_noHD"}.mp4`); }
+      catch (e) { size = await saveFile(link.direct, `${base}${link.hd ? "" : "_noHD"}.mp4`); }
+      return `Saved ${(size / 1048576).toFixed(1)} MB${link.hd ? " · HD" : " · no HD available"}`;
+    } catch (e) {
+      if (attempt === 3) throw e;
+      await sleep(8000 * attempt);
+    }
+  }
+}
+
+async function runOne(post) {
+  try {
+    const msg = await downloadPost(post);
+    markSaved(profile.username, post.id); post.saved = true;
+    setItem(post, msg, "ok");
+    return true;
+  } catch (e) { setItem(post, "Failed: " + e.message + " (tap Get to retry)", "err"); return false; }
+}
+
+function addPost(post) {
+  const el = document.createElement("div");
+  el.className = "item";
+  el.innerHTML = `<img alt="" referrerpolicy="no-referrer"><div class="info"><div class="t"></div><div class="d"></div><div class="s"></div></div><button type="button" class="ghost">Get</button>`;
+  const thumb = post.cover || (post.images[0] && post.images[0][0]);
+  if (thumb) el.querySelector("img").src = thumb;
+  el.querySelector("img").onerror = function () { this.style.visibility = "hidden"; };
+  el.querySelector(".t").textContent = (post.photo ? `Photos (${post.images.length})` : "Video") + " · " + day(post.time);
+  el.querySelector(".d").textContent = post.desc || "";
+  el.querySelector("button").onclick = () => { if (!running) runOne(post); };
+  post.el = el;
+  $("list").appendChild(el);
+  if (post.saved) setItem(post, "Saved before", "ok");
+}
+
+function updateSummary(finished) {
+  const v = posts.filter((p) => !p.photo).length, ph = posts.length - v;
+  $("summary").textContent = `@${profile.username}: ${v} videos, ${ph} photo posts${finished ? "" : " (still looking…)"}`;
+}
+
+$("pform").onsubmit = async (e) => {
+  e.preventDefault();
+  if (running) return;
+  const user = $("user").value.trim();
+  if (!user) return;
+  $("list").innerHTML = ""; posts = []; $("pbox").style.display = "none";
+  $("find").disabled = true; $("find").textContent = "Looking…";
+  try {
+    pstatus("Opening the profile…");
+    profile = await api({ profile: user });
+    const saved = savedSet(profile.username), seen = new Set();
+    $("pbox").style.display = "block";
+    pstatus(profile.count != null ? `TikTok says ${profile.count} posts. Listing them…` : "Listing posts…");
+    let cursor = profile.cursor, device = profile.device, repeats = 0;
+    while (true) {
+      const page = await api({ profile: profile.username, secUid: profile.secUid, cookie: profile.cookie, device, cursor });
+      const fresh = page.items.filter((i) => !seen.has(i.id));
+      if (page.items.length && !fresh.length) {
+        if (++repeats > 3) break;
+        device = ""; continue; // TikTok repeated itself: new device id
+      }
+      repeats = 0;
+      for (const p of fresh) { seen.add(p.id); p.saved = saved.has(p.id); posts.push(p); addPost(p); }
+      updateSummary(false);
+      if (page.done) break;
+      cursor = page.cursor;
+      await pause(1, 2);
+    }
+    updateSummary(true);
+    pstatus(posts.length ? "Ready. Tap “Download all” or Get on any post." : "No posts found.", !posts.length);
+  } catch (err) {
+    pstatus("Couldn't list the profile: " + err.message, true);
+  } finally {
+    $("find").disabled = false; $("find").textContent = "Find all posts";
+  }
+};
+
+$("all").onclick = async () => {
+  if (running || !posts.length) return;
+  const todo = posts.filter((p) => (p.photo ? $("wantPhotos").checked : $("wantVideos").checked) && !(p.saved && $("skipDone").checked));
+  // photos first: their image links expire after a day or two
+  todo.sort((a, b) => b.photo - a.photo);
+  if (!todo.length) return pstatus("Nothing left to download.");
+  running = true; stopAsked = false;
+  $("all").disabled = true; $("stop").style.display = ""; $("bar").style.display = "block";
+  let ok = 0, failed = 0;
+  for (let i = 0; i < todo.length && !stopAsked; i++) {
+    pstatus(`Downloading ${i + 1} of ${todo.length}…`);
+    todo[i].el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    (await runOne(todo[i])) ? ok++ : failed++;
+    $("bar").firstElementChild.style.width = ((i + 1) / todo.length * 100) + "%";
+    if (i < todo.length - 1 && !stopAsked) await pause(2, 4);
+  }
+  pstatus(`${stopAsked ? "Stopped. " : "Done. "}${ok} saved, ${failed} failed${failed ? " — tap Download all again to retry them" : ""}.`, failed > 0);
+  running = false; $("all").disabled = false; $("stop").style.display = "none";
+};
+$("stop").onclick = () => { stopAsked = true; pstatus("Stopping after this one…"); };
 
 // allow links like ?url=https://vt.tiktok.com/... (handy for Shortcuts / share sheets)
 const preset = new URLSearchParams(location.search).get("url");
