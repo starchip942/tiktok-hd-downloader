@@ -41,12 +41,15 @@
     padding: 16px; display: none;
   }
   .card.show { display: block; }
-  video { width: 100%; max-height: 60vh; border-radius: 12px; background: #000; display: block; }
+  video { width: 100%; margin-bottom: 4px; max-height: 60vh; border-radius: 12px; background: #000; display: block; }
   .name { margin: 14px 0 4px; font-weight: 650; word-break: break-word; }
   .badge { display: inline-block; font-size: .8rem; font-weight: 700; padding: 3px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
   .badge.hd { background: rgba(34,197,94,.15); color: var(--ok); }
   .badge.sd { background: rgba(250,204,21,.15); color: #facc15; }
-  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .actions { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 14px; }
+  .actions button:disabled { opacity: .6; cursor: default; }
+  .photos { display: grid; gap: 10px; } .photos:empty { display: none; }
+  .photos img { width: 100%; border-radius: 12px; display: block; background: #000; -webkit-touch-callout: default; }
   .hint { color: var(--muted); font-size: .85rem; margin-top: 12px; }
   .tabs { display: flex; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 4px; margin-bottom: 18px; }
   .tabs button { flex: 1; padding: 11px; background: none; color: var(--muted); border-radius: 10px; }
@@ -86,7 +89,7 @@
       <input id="url" type="url" placeholder="https://vt.tiktok.com/…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       <button type="button" class="ghost" id="paste">Paste</button>
     </div>
-    <button type="submit" class="primary" id="go">Get HD video</button>
+    <button type="submit" class="primary" id="go">Get HD</button>
   </form>
 
   <div class="status" id="status"></div>
@@ -94,10 +97,8 @@
   <section class="card" id="result">
     <video id="preview" controls playsinline preload="metadata"></video>
     <div class="name"><span id="name"></span><span class="badge" id="badge"></span></div>
-    <div class="actions">
-      <a class="btn primary" id="dl" href="#" rel="noreferrer">Download HD</a>
-      <a class="btn ghost" id="open" href="#" target="_blank" rel="noreferrer">Open original</a>
-    </div>
+    <div class="actions"><button type="button" class="primary" id="save" disabled>Preparing…</button></div>
+    <div class="photos" id="photos" style="margin-top:14px"></div>
   </section>
   </div>
 
@@ -139,33 +140,187 @@ $("paste").onclick = async () => {
   catch (e) { status("Couldn't read the clipboard. Long-press the box and tap Paste.", true); }
 };
 
+// ---------- remove date info (so saved files land at the end of the gallery) ----------
+// JPEG: drop the EXIF / XMP / Photoshop blocks (where the dates live). Pixels are untouched.
+function stripJpeg(buf) {
+  const b = new Uint8Array(buf);
+  if (b[0] !== 0xff || b[1] !== 0xd8) return b;
+  const parts = [b.subarray(0, 2)];
+  let i = 2;
+  while (i + 4 <= b.length && b[i] === 0xff) {
+    const m = b[i + 1];
+    if (m === 0xff) { i++; continue; }
+    if (m === 0xda) break; // image data starts: keep everything from here
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { parts.push(b.subarray(i, i + 2)); i += 2; continue; }
+    const len = (b[i + 2] << 8) | b[i + 3];
+    if (m !== 0xe1 && m !== 0xed) parts.push(b.subarray(i, i + 2 + len)); // APP1 = EXIF/XMP, APP13 = IPTC
+    i += 2 + len;
+  }
+  parts.push(b.subarray(i));
+  const out = new Uint8Array(parts.reduce((n, x) => n + x.length, 0));
+  let o = 0; for (const x of parts) { out.set(x, o); o += x.length; }
+  return out;
+}
+
+// MP4: set every creation/modification time to "unset" and hide date tags. Video/audio untouched.
+function stripMp4(buf) {
+  const b = new Uint8Array(buf), dv = new DataView(buf);
+  const name = (p) => String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3]);
+  const setName = (p, t) => { for (let k = 0; k < 4; k++) b[p + k] = t.charCodeAt(k); };
+  const inside = new Set(["moov", "trak", "mdia", "minf", "stbl", "udta", "ilst", "edts", "moof", "traf", "mvex"]);
+  const dateTags = new Set(["©day", "date", "XMP_", "©xyz"]);
+  function walk(start, end) {
+    let p = start;
+    while (p + 8 <= end) {
+      let size = dv.getUint32(p), head = 8;
+      const type = name(p + 4);
+      if (size === 1) { size = Number(dv.getBigUint64(p + 8)); head = 16; }
+      else if (size === 0) size = end - p;
+      if (size < head || p + size > end) break;
+      const body = p + head;
+      if (type === "mvhd" || type === "tkhd" || type === "mdhd") {
+        b.fill(0, body + 4, body + 4 + (b[body] === 1 ? 16 : 8));
+      } else if (dateTags.has(type) || (type === "uuid" && start === 0)) {
+        setName(p + 4, "free");
+      } else if (type === "meta") {
+        // QuickTime "meta" starts with its children; MP4 "meta" has 4 extra bytes first
+        walk(name(body + 4) === "hdlr" ? body : name(body + 8) === "hdlr" ? body + 4 : body, p + size);
+      } else if (type === "keys") {
+        // QuickTime keys (e.g. com.apple.quicktime.creationdate): rename any "date" key so nothing reads it
+        for (let q = body; q + 4 <= p + size; q++)
+          if (b[q] === 0x64 && name(q) === "date") b[q] = 0x78;
+      } else if (inside.has(type)) {
+        walk(body, p + size);
+      }
+      p += size;
+    }
+  }
+  walk(0, b.length);
+  return b;
+}
+
+function cleanBytes(buf, filename) {
+  try {
+    if (/\.jpe?g$/i.test(filename)) return stripJpeg(buf);
+    if (/\.mp4$/i.test(filename)) return stripMp4(buf);
+  } catch (e) {}
+  return new Uint8Array(buf);
+}
+
+// fetch a file through the helper, report progress, return it with the date info removed
+async function fetchClean(url, filename, cookie, onProgress) {
+  const res = await fetch(API + "?" + new URLSearchParams(cookie ? { file: url, name: filename, cookie } : { file: url, name: filename }));
+  const type = res.headers.get("Content-Type") || "";
+  if (!res.ok || type.includes("json")) throw new Error("file download failed");
+  const total = Number(res.headers.get("Content-Length")) || 0;
+  let buf;
+  if (onProgress && res.body && total) {
+    const reader = res.body.getReader(), chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got += value.length;
+      onProgress(Math.min(99, Math.round(got / total * 100)));
+    }
+    const all = new Uint8Array(got); let o = 0;
+    for (const c of chunks) { all.set(c, o); o += c.length; }
+    buf = all.buffer;
+  } else {
+    buf = await res.arrayBuffer();
+  }
+  if (buf.byteLength < 1000) throw new Error("file was too small");
+  const mime = /\.mp4$/i.test(filename) ? "video/mp4" : /\.jpe?g$/i.test(filename) ? "image/jpeg" : (type || "application/octet-stream");
+  return new File([cleanBytes(buf, filename)], filename, { type: mime });
+}
+
+const isApple = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+
+// iPhone/iPad: open the share sheet (Save Video / Save Images goes straight to Photos). Others: normal download.
+async function saveFiles(files) {
+  if (isApple() && navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files }); return true; }
+    catch (e) { if (e.name === "AbortError") return false; }
+  }
+  for (const f of files) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(f); a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  }
+  return true;
+}
+
+// ---------- one link ----------
+let lookup = 0;
 async function getVideo(link) {
+  const mine = ++lookup;
   $("result").classList.remove("show");
-  $("preview").removeAttribute("src");
+  $("preview").removeAttribute("src"); $("preview").style.display = "none";
+  $("photos").innerHTML = "";
   if (!/tiktok\.com\//i.test(link)) return status("That doesn't look like a TikTok link.", true);
-  $("go").disabled = true; $("go").textContent = "Getting video…"; status("Asking MusicallyDown for the HD file…");
+  $("go").disabled = true; $("go").textContent = "Looking…"; status("Getting the original file…");
+  const save = $("save");
+  save.disabled = true; save.textContent = "Preparing…"; save.onclick = null;
   try {
     const res = await fetch(API + "?url=" + encodeURIComponent(link));
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Something went wrong");
-    const name = (data.filename || "tiktok").replace(/\[HD\]$/, "");
-    $("name").textContent = name;
+
+    if (data.type === "photo") {
+      const n = data.images.length;
+      $("name").textContent = (data.author ? "@" + data.author + " · " : "") + n + (n === 1 ? " photo" : " photos");
+      $("badge").textContent = "Full size"; $("badge").className = "badge hd";
+      $("result").classList.add("show");
+      status(`Loading ${n} full-size photo${n === 1 ? "" : "s"}…`);
+      const files = [];
+      for (let i = 0; i < n; i++) {
+        const fname = `${data.id || "tiktok"}_${String(i + 1).padStart(2, "0")}.jpg`;
+        let file = null;
+        for (const url of data.images[i]) { try { file = await fetchClean(url, fname); break; } catch (e) {} }
+        if (mine !== lookup) return;
+        if (!file) continue;
+        files.push(file);
+        const img = document.createElement("img");
+        img.src = URL.createObjectURL(file); img.alt = "";
+        $("photos").appendChild(img);
+      }
+      if (!files.length) throw new Error("couldn't load the photos");
+      status(files.length < n ? `Loaded ${files.length} of ${n} photos.` : "");
+      save.disabled = false;
+      save.textContent = files.length === 1 ? "Save photo" : `Save all ${files.length} photos`;
+      save.onclick = () => saveFiles(files);
+      logDownload({ kind: "single-photo", link, hd: null });
+      return;
+    }
+
+    const base = (data.filename || "tiktok").replace(/\[HD\]$/, "").replace(/[^\w.\-]+/g, "_");
+    $("name").textContent = base;
     $("badge").textContent = data.hd ? "HD original" : "SD only";
     $("badge").className = "badge " + (data.hd ? "hd" : "sd");
-    $("dl").href = data.proxied;
-    const entry = { kind: "single", link, hd: data.hd };
-    $("dl").onclick = $("open").onclick = () => logDownload({ ...entry });
-    $("open").href = data.direct;
     const v = $("preview");
     v.style.display = "block";
     v.onerror = () => { if (v.src !== data.proxied) v.src = data.proxied; else v.style.display = "none"; };
     v.src = data.direct;
     $("result").classList.add("show");
-    status(data.hd ? "Ready. This is the full-quality original." : "MusicallyDown only had the normal quality for this one.");
+    status(data.hd ? "" : "MusicallyDown only had the normal quality for this one.");
+
+    // get the file ready in the background so one tap saves it
+    let file = null;
+    for (const url of [data.proxied, data.direct]) {
+      try { file = await fetchClean(url, base + ".mp4", null, (pct) => { if (mine === lookup) save.textContent = `Preparing… ${pct}%`; }); break; } catch (e) {}
+    }
+    if (mine !== lookup) return;
+    if (!file) throw new Error("the video file wouldn't download");
+    save.disabled = false;
+    save.textContent = isApple() ? "Save video" : "Download video";
+    save.onclick = async () => { if (await saveFiles([file])) logDownload({ kind: "single", link, hd: data.hd }); };
   } catch (e) {
-    status("Couldn't get the video: " + e.message + ". If this keeps happening, try again with the 1.1.1.1 app on.", true);
+    if (mine !== lookup) return;
+    status("Couldn't get it: " + e.message + ". If this keeps happening, try again with the 1.1.1.1 app on.", true);
+    save.textContent = "Not available";
   } finally {
-    $("go").disabled = false; $("go").textContent = "Get HD video";
+    if (mine === lookup) { $("go").disabled = false; $("go").textContent = "Get HD"; }
   }
 }
 
@@ -250,17 +405,18 @@ async function api(params) {
 }
 
 async function saveFile(url, name, cookie) {
-  const res = await fetch(API + "?" + new URLSearchParams(cookie ? { file: url, name, cookie } : { file: url, name }));
-  const type = res.headers.get("Content-Type") || "";
-  if (!res.ok || type.includes("json")) throw new Error("file download failed");
-  const blob = await res.blob();
-  if (blob.size < 1000) throw new Error("file was too small");
+  const file = await fetchClean(url, name, cookie);
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = name;
+  a.href = URL.createObjectURL(file); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  return blob.size;
+  return file.size;
 }
+
+const jpegFirst = (list) => [...(list || [])].sort((a, b) => {
+  const score = (u) => (/jpe?g/i.test(u) ? 0 : /webp|heic|avif/i.test(u) ? 2 : 1);
+  return score(a) - score(b);
+});
 
 function setItem(post, text, cls = "") { const el = post.el.querySelector(".s"); el.textContent = text; el.className = "s " + cls; }
 
@@ -271,7 +427,7 @@ async function downloadPost(post) {
     for (let n = 0; n < post.images.length; n++) {
       setItem(post, `Saving slide ${n + 1} of ${post.images.length}…`, "busy");
       const name = `${base}_${String(n + 1).padStart(2, "0")}.jpg`;
-      for (const url of post.images[n]) {
+      for (const url of jpegFirst(post.images[n])) {
         try { await saveFile(url, name); saved++; break; } catch (e) {}
       }
       await pause(0.5, 1.2);

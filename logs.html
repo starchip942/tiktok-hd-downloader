@@ -66,7 +66,7 @@
 <script>
 const API = "https://asafa.metesahin10.workers.dev/";
 const $ = (id) => document.getElementById(id);
-const KIND = { single: "One link", video: "Video", photo: "Photos", story: "Story", "story-photo": "Story photos" };
+const KIND = { single: "One link", "single-photo": "One link (photos)", video: "Video", photo: "Photos", story: "Story", "story-photo": "Story photos" };
 let password = "", rows = [], total = 0;
 
 const status = (t, err = false) => { $("status").textContent = t; $("status").className = "status" + (err ? " err" : ""); };

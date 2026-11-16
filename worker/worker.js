@@ -117,7 +117,73 @@ async function musicaldown(videoUrl) {
       filename = payload.filename || null;
     } catch (e) {}
   }
-  return { ok: true, hd: Boolean(hd), direct, proxied, filename, debug };
+  return { ok: true, type: "video", hd: Boolean(hd), direct, proxied, filename, debug };
+}
+
+// ---------- photo posts (MusicallyDown can't do these) ----------
+
+// full-size JPEG first, webp/heic last
+function jpegFirst(list) {
+  const score = (u) => (/jpe?g/i.test(u) ? 0 : /webp|heic|avif/i.test(u) ? 2 : 1);
+  return [...(list || [])].sort((a, b) => score(a) - score(b));
+}
+
+function findItemStruct(o, depth = 0) {
+  if (!o || typeof o !== "object" || depth > 8) return null;
+  if (o.itemStruct && typeof o.itemStruct === "object") return o.itemStruct;
+  for (const k of Object.keys(o)) {
+    const found = findItemStruct(o[k], depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+// read the post straight from TikTok's page
+async function tiktokPost(link) {
+  for (const ua of [IPAD_USER_AGENT, USER_AGENT]) {
+    try {
+      const r = await fetch(link, { headers: { "User-Agent": ua, "Accept-Language": "en-US,en;q=0.9", Referer: TIKTOK + "/" } });
+      const html = await r.text();
+      const m = html.match(/<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/);
+      if (!m) continue;
+      const item = findItemStruct(JSON.parse(m[1]));
+      if (item) return item;
+    } catch (e) {}
+  }
+  return null;
+}
+
+// free backup: tikwm's public API
+async function tikwmPost(link) {
+  const r = await fetch("https://www.tikwm.com/api/", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT },
+    body: new URLSearchParams({ url: link, hd: "1" }),
+  });
+  const body = await r.json();
+  if (body.code !== 0 || !body.data) return null;
+  return body.data;
+}
+
+async function photoPost(link) {
+  const item = await tiktokPost(link);
+  if (item && item.imagePost && (item.imagePost.images || []).length) {
+    return {
+      ok: true, type: "photo", source: "tiktok", id: item.id,
+      author: item.author && item.author.uniqueId,
+      images: item.imagePost.images.map((im) => jpegFirst((im.imageURL && im.imageURL.urlList) || [])),
+    };
+  }
+  if (item && !item.imagePost) return null; // it's a video after all
+  const data = await tikwmPost(link).catch(() => null);
+  if (data && Array.isArray(data.images) && data.images.length) {
+    return {
+      ok: true, type: "photo", source: "tikwm", id: data.id,
+      author: data.author && data.author.unique_id,
+      images: data.images.map((u) => [u]),
+    };
+  }
+  return null;
 }
 
 // ---------- whole profiles ----------
@@ -259,7 +325,7 @@ async function storyPage(p) {
 }
 
 // stream a TikTok / MusicallyDown file back with CORS, so the page can save it with a proper name
-const FILE_HOSTS = /(^|\.)(tiktokcdn\.com|tiktokcdn-us\.com|tiktokcdn-eu\.com|tokcdn\.com|muscdn\.app|ibyteimg\.com|tiktok\.com|byteoversea\.com|musicaldown\.com)$/i;
+const FILE_HOSTS = /(^|\.)(tiktokcdn\.com|tiktokcdn-us\.com|tiktokcdn-eu\.com|tokcdn\.com|muscdn\.app|ibyteimg\.com|tiktok\.com|byteoversea\.com|musicaldown\.com|tikwm\.com)$/i;
 
 async function proxyFile(fileUrl, name, cookie) {
   let host;
@@ -348,10 +414,18 @@ export default {
     if (!url) return json({ ok: false, error: "add ?url=<tiktok link> or ?profile=<username> to the address" }, 400);
     if (!/^https?:\/\/([a-z0-9-]+\.)*tiktok\.com\//i.test(url))
       return json({ ok: false, error: "that is not a TikTok link" }, 400);
+    let result;
     try {
-      return json(await musicaldown(url));
+      result = await musicaldown(url);
     } catch (e) {
-      return json({ ok: false, error: String(e) }, 502);
+      result = { ok: false, error: String(e) };
     }
+    if (result.ok) return json(result);
+    // MusicallyDown failed: maybe it's a photo post
+    try {
+      const photos = await photoPost(url);
+      if (photos) return json(photos);
+    } catch (e) {}
+    return json(result);
   },
 };
