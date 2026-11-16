@@ -121,7 +121,6 @@
       </div>
       <div class="row">
         <button type="button" class="primary" id="all">Download all as .zip</button>
-        <button type="button" class="ghost" id="stop" style="display:none">Stop</button>
       </div>
       <div class="progress" id="bar"><div></div></div>
       <button type="button" class="primary" id="savezip" style="display:none;width:100%;margin-top:10px;background:var(--ok)"></button>
@@ -659,7 +658,7 @@ $("all").onclick = async () => {
   if (!todo.length) return pstatus("Nothing left to download.");
   running = true; stopAsked = false;
   zip = { entries: [], size: 0, posts: [] }; zipPartNo = 0;
-  $("all").disabled = true; $("stop").style.display = ""; $("bar").style.display = "block";
+  $("all").disabled = true; $("bar").style.display = "block";
   let ok = 0, failed = 0;
   for (let i = 0; i < todo.length && !stopAsked; i++) {
     pstatus(`Downloading ${i + 1} of ${todo.length}…`);
@@ -668,7 +667,6 @@ $("all").onclick = async () => {
     $("bar").firstElementChild.style.width = ((i + 1) / todo.length * 100) + "%";
     if (i < todo.length - 1 && !stopAsked) await pause(2, 4);
   }
-  $("stop").style.display = "none";
   const failNote = failed ? `, ${failed} failed (tap Download all again later to retry them)` : "";
   if (zip.entries.length) {
     pstatus(`${stopAsked ? "Stopped" : "Done"}. ${ok} added${failNote}. Tap the green button to save the zip.`, failed > 0);
@@ -680,7 +678,6 @@ $("all").onclick = async () => {
   zip = null;
   running = false; $("all").disabled = false;
 };
-$("stop").onclick = () => { stopAsked = true; pstatus("Stopping after this one…"); };
 window.addEventListener("beforeunload", (e) => { if (running) { e.preventDefault(); e.returnValue = ""; } });
 
 // allow links like ?url=https://vt.tiktok.com/... (handy for Shortcuts / share sheets)
